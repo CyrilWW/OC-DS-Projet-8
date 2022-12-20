@@ -116,26 +116,6 @@ features_df = features_df.select(
 )
 print(f"OK: list_to_vector_udf")
 
-# inputCols = ["features"]
-# outputCol = "features_vect"
-# df_va = VectorAssembler(inputCols = inputCols, outputCol = outputCol)
-# features_df = df_va.transform(features_df)
-# features_df.printSchema()
-# print(f"OK: VectorAssembler")
-
-# features_df.toPandas() # DEBUG
-# features_df = features_df.collect()
-# sys.exit(0) # DEBUG
-
-# PCA
-# pca = PCA(k=2, inputCol="features", outputCol="pcaFeatures") # k=20 # Passer à 2 
-# pca.setOutputCol("pcaFeatures")
-# print(f"OK: PCA()")
-# model = pca.fit(features_df)
-# print(f"OK: pca.fit")
-# result = model.transform(features_df).select("pcaFeatures") #.collect()
-# result.show(truncate=False) # Supprimé après l'ajout du .collect()
-# print("OK: model.transform")
 
 # PCA avec RDD
 from pyspark.mllib.linalg.distributed import RowMatrix
