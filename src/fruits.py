@@ -43,6 +43,9 @@ images = spark.read.format("binaryFile") \
     .option("recursiveFileLookup", "true") \
     .load(f"s3://oc-ds-p8-fruits-project/data_{nb_images}")
 print("OK: read.format")
+img_path = list(
+    images.select('path').toPandas()['path']
+)
 
 # Chargement du modèle CNN
 model = ResNet50(include_top=False)
@@ -98,15 +101,16 @@ def featurize_udf(content_series_iter):
 
 # Réduire la valeur 1024 si problème de mémoire (Out Of Memory)
 # spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "1024")
-print("OK: spark.conf.set")
+# print("OK: spark.conf.set")
 
 # Featurisation
-features_df = images.select(featurize_udf("content").alias("features")) # Recommandé de ne pas l'utiliser, nécessite des ressources
+features_df = images.select(featurize_udf("content").alias("features")) # images.repartition(16) : Recommandé de ne pas l'utiliser, nécessite des ressources
 
 # Tranformation en Vector
-from pyspark.ml.linalg import Vectors, VectorUDT
+from pyspark.ml.linalg import Vectors as ml_Vectors
+from pyspark.ml.linalg import VectorUDT as ml_VectorUDT
 from pyspark.sql.functions import udf
-list_to_vector_udf = udf(lambda l: Vectors.dense(l), VectorUDT())
+list_to_vector_udf = udf(lambda l: ml_Vectors.dense(l), ml_VectorUDT())
 features_df = features_df.select(
     list_to_vector_udf(features_df["features"]).alias("features")
 )
@@ -119,25 +123,45 @@ print(f"OK: list_to_vector_udf")
 # features_df.printSchema()
 # print(f"OK: VectorAssembler")
 
-# PCA
-pca = PCA(k=20, inputCol="features", outputCol="pcaFeatures")
-pca.setOutputCol("pcaFeatures")
-print(f"OK: PCA()")
-model = pca.fit(features_df)
-print(f"OK: pca.fit")
+# features_df.toPandas() # DEBUG
+# features_df = features_df.collect()
+# sys.exit(0) # DEBUG
 
-result = model.transform(features_df).select("pcaFeatures") #.collect()
-result.show(truncate=False) # Supprimé après l'ajoute du .collect()
-print("OK: model.transform")
+# PCA
+# pca = PCA(k=2, inputCol="features", outputCol="pcaFeatures") # k=20 # Passer à 2 
+# pca.setOutputCol("pcaFeatures")
+# print(f"OK: PCA()")
+# model = pca.fit(features_df)
+# print(f"OK: pca.fit")
+# result = model.transform(features_df).select("pcaFeatures") #.collect()
+# result.show(truncate=False) # Supprimé après l'ajout du .collect()
+# print("OK: model.transform")
+
+# PCA avec RDD
+from pyspark.mllib.linalg.distributed import RowMatrix
+from pyspark.mllib.linalg import Vectors as mllib_Vectors
+features_clc = features_df.select('features').collect()
+features_vec = [mllib_Vectors.dense(f[0]) for f in features_clc]
+rows = sc.parallelize(features_vec)
+mat = RowMatrix(rows)
+k_dim = 2
+pca = mat.computePrincipalComponents(k_dim)
+projected = mat.multiply(pca).rows.collect()
+
+elapsed = time.time() - t0
+print(f"OK: mat.multiply")
 
 # Ecriture du résultat de l'ACP
-pca_df = result.toPandas()
+columns = [f"F{k+1}" for k in range(k_dim)]
+projected_df = pd.DataFrame(data=projected, columns=columns)
+projected_df['Path'] = img_path
+print(f"projected_df = {projected_df}")
+
 pca_file = f"s3://oc-ds-p8-fruits-project/pca_{nb_images}_{nb_slaves}_{timestamp}.csv"
-pca_df.to_csv(pca_file, sep=';')
-print("OK: pca_df.to_csv S3")
+projected_df.to_csv(pca_file, sep=';')
+print("OK: projected_df.to_csv S3")
 
 # Ecriture du temps écoulé
-elapsed = time.time() - t0
 print(f"Temps utilisateur : {elapsed}")
 exec_df = pd.DataFrame({'nb_images': [nb_images], 
                         'nb_slaves': [nb_slaves],

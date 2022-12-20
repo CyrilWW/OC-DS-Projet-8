@@ -1,58 +1,60 @@
+import sys
+import io
+
 from pyspark.sql import SparkSession
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.feature import PCA
 from pyspark.ml.linalg import Vectors
+from pyspark.sql.functions import col, pandas_udf, PandasUDFType
+from pyspark import SparkContext
 
 import pandas as pd
 from PIL import Image
 import numpy as np
-import io
-import tensorflow as tf
+import time
+import datetime
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing.image import img_to_array
 
-from pyspark.sql.functions import col, pandas_udf, PandasUDFType
+# spark-submit --deploy-mode cluster s3://oc-ds-p8-fruits-project/fruits.py 16 2
+# Devenu inutile :
+# spark-submit --deploy-mode cluster --master yarn --driver-memory 5g --executor-memory 5g --num-executors 1 --executor-cores 4 --conf spark.dynamicAllocation.enabled=false s3://oc-ds-p8-fruits-project/fruits.py
+# spark-submit --deploy-mode cluster --master yarn --driver-memory 2g --executor-memory 2g --num-executors 1 --executor-cores 1 s3://oc-ds-p8-fruits-project/fruits.py
 
-from pyspark import SparkContext
+# Récupération des arguments :
+nb_images = int(sys.argv[1])
+nb_slaves = int(sys.argv[2]) # Pour capitalisation des résultats
 
+# Démarrage du chrono
+t0 = time.time()
+timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
+# Spark
 sc = SparkContext()
-
-
 spark = SparkSession \
         .builder \
-        .appName("Python Spark create RDD example") \
-        .config("spark.some.config.option", "some-value") \
+        .appName("Python Spark ResNet50 + PCA") \
         .getOrCreate()
-# df = spark.sparkContext\
-#         .parallelize([(1, 2, 3, 'a b c'),
-#         (4, 5, 6, 'd e f'),
-#         (7, 8, 9, 'g h i')])\
-#         .toDF(['col1', 'col2', 'col3','col4'])
-# df.show()
+        # .config("spark.some.config.option", "some-value") \
 
 # Chargement des images
 images = spark.read.format("binaryFile") \
-  .option("pathGlobFilter", "*.jpg") \
-  .option("recursiveFileLookup", "true") \
-  .load("./data")
-# display(images.limit(5))
+    .option("pathGlobFilter", "*.jpg") \
+    .option("recursiveFileLookup", "true") \
+    .load(f"./data_{nb_images}")
 print("OK: read.format")
+# img_path = images.path.toList()
+img_path = list(
+    images.select('path').toPandas()['path']
+)
+print(f"img_path = {img_path}")
 
-# Test de chargement du modèle CNN
+# Chargement du modèle CNN
 model = ResNet50(include_top=False)
 model.summary()
 print("OK: CNN model")
 
-# Test
-data = [(Vectors.sparse(5, [(1, 1.0), (3, 7.0)]),),
-        (Vectors.dense([2.0, 0.0, 3.0, 4.0, 5.0]),),
-        (Vectors.dense([4.0, 0.0, 0.0, 6.0, 7.0]),)]
-df = spark.createDataFrame(data, ["features"])
-df.show(truncate=False)
-df.printSchema()
-
-# Construction du modème
+# Construction du modèle
 bc_model_weights = sc.broadcast(model.get_weights())
 def model_fn():
     """
@@ -99,33 +101,25 @@ def featurize_udf(content_series_iter):
     for content_series in content_series_iter:
         yield featurize_series(model, content_series)
 
-# Pandas UDFs on large records (e.g., very large images) can run into Out Of Memory (OOM) errors.
-# If you hit such errors in the cell below, try reducing the Arrow batch size via `maxRecordsPerBatch`.
-spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "1024")
+# Réduire la valeur 1024 si problème de mémoire (Out Of Memory)
+# spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "1024")
+# spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "128")
+# print("OK: spark.conf.set")
 
-# We can now run featurization on our entire Spark DataFrame.
-# NOTE: This can take a long time (about 10 minutes) since it applies a large model to the full dataset.
-# features_df = images.repartition(16).select(col("path"), featurize_udf("content").alias("features"))
-features_df = images.repartition(16).select(featurize_udf("content").alias("features"))
-# features_df.write.mode("overwrite").parquet("dbfs:/ml/tmp/flower_photos_features")
+# Featurisation
+# features_df = images.repartition(16).select(featurize_udf("content").alias("features")) # Recommandé de ne pas utiliser .repartition, nécessite des ressources
+# features_df = images.repartition(8).select(featurize_udf("content").alias("features")) # Recommandé de ne pas utiliser .repartition, nécessite des ressources
+features_df = images.select(featurize_udf("content").alias("features")) # Recommandé de ne pas utiliser .repartition, nécessite des ressources
 
 # Tranformation en Vector
-
-features_df.show(5)
-print("Avant :")
-features_df.printSchema()
-
-# from pyspark.ml.functions import array_to_vector
-# features_df = features_df.select(array_to_vector('features')).collect()
-
-from pyspark.ml.linalg import Vectors, VectorUDT
+# from pyspark.ml.linalg import Vectors, VectorUDT
+from pyspark.ml.linalg import Vectors as ml_Vectors
+from pyspark.ml.linalg import VectorUDT as ml_VectorUDT
 from pyspark.sql.functions import udf
-list_to_vector_udf = udf(lambda l: Vectors.dense(l), VectorUDT())
+list_to_vector_udf = udf(lambda l: ml_Vectors.dense(l), ml_VectorUDT())
 features_df = features_df.select(
     list_to_vector_udf(features_df["features"]).alias("features")
 )
-print("Après :")
-features_df.printSchema()
 print(f"OK: list_to_vector_udf")
 
 # inputCols = ["features"]
@@ -136,14 +130,46 @@ print(f"OK: list_to_vector_udf")
 # print(f"OK: VectorAssembler")
 
 # PCA
-pca = PCA(k=3, inputCol="features", outputCol="pcaFeatures")
-# model = pca.fit(df)
-model = pca.fit(features_df)
+# pca = PCA(k=20, inputCol="features", outputCol="pcaFeatures")
+# pca.setOutputCol("pcaFeatures")
+# print(f"OK: PCA()")
+# model = pca.fit(features_df)
+# print(f"OK: pca.fit")
+# result = model.transform(features_df).select("pcaFeatures") #.collect()
+# result.show(truncate=False) # Supprimé après l'ajoute du .collect()
+# print("OK: model.transform")
 
-result = model.transform(features_df).select("pcaFeatures")
-result.show(truncate=False)
+# PCA avec RDD
+from pyspark.mllib.linalg.distributed import RowMatrix
+from pyspark.mllib.linalg import Vectors as mllib_Vectors
+features_clc = features_df.select('features').collect()
+features_vec = [mllib_Vectors.dense(f[0]) for f in features_clc]
+rows = sc.parallelize(features_vec)
+mat = RowMatrix(rows)
+k_dim = 2
+pca = mat.computePrincipalComponents(k_dim)
+projected = mat.multiply(pca).rows.collect()
 
-# from pyspark.sql.functions import col
-# result.withColumn('pcaFeatures', col('pcaFeatures').cast('string')).write.csv("./rezuzu.csv")
-pd = result.toPandas()
-pd.to_csv("./rezuzuzu.csv")
+elapsed = time.time() - t0
+print(f"OK: mat.multiply")
+
+# Ecriture du résultat de l'ACP
+columns = [f"F{k+1}" for k in range(k_dim)]
+projected_df = pd.DataFrame(data=projected, columns=columns)
+projected_df['Path'] = img_path
+print(f"projected_df = {projected_df}")
+
+pca_file = f"./pca_{nb_images}_{nb_slaves}_{timestamp}.csv"
+projected_df.to_csv(pca_file, sep=';')
+print("OK: projected_df.to_csv S3")
+
+# Ecriture du temps écoulé
+print(f"Temps utilisateur : {elapsed}")
+exec_df = pd.DataFrame({'nb_images': [nb_images], 
+                        'nb_slaves': [nb_slaves],
+                        'elapsed': [elapsed]})
+report_file = f"./report_{nb_images}_{nb_slaves}_{timestamp}.csv"
+exec_df.to_csv(report_file, sep=';')
+print("OK: exec_df.to_csv S3")
+
+spark.stop()
