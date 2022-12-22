@@ -117,25 +117,22 @@ features_df = features_df.select(
 print(f"OK: list_to_vector_udf")
 
 
-# PCA avec RDD
-from pyspark.mllib.linalg.distributed import RowMatrix
-from pyspark.mllib.linalg import Vectors as mllib_Vectors
-features_clc = features_df.select('features').collect()
-features_vec = [mllib_Vectors.dense(f[0]) for f in features_clc]
-rows = sc.parallelize(features_vec)
-mat = RowMatrix(rows)
+# PCA
 k_dim = 2
-pca = mat.computePrincipalComponents(k_dim)
-projected = mat.multiply(pca).rows.collect()
+
+from pyspark.ml.feature import PCA
+pca = PCA(k=k_dim, inputCol="features", outputCol="pcaFeatures")
+model = pca.fit(features_df)
+print(f"OK: pca.fit")
+projected = model.transform(features_df).select("pcaFeatures")
+print(f"OK: model.transform")
 
 elapsed = time.time() - t0
-print(f"OK: mat.multiply")
 
 # Ecriture du résultat de l'ACP
 columns = [f"F{k+1}" for k in range(k_dim)]
-projected_df = pd.DataFrame(data=projected, columns=columns)
+projected_df = projected.toPandas()
 projected_df['Path'] = img_path
-print(f"projected_df = {projected_df}")
 
 pca_file = f"s3://oc-ds-p8-fruits-project/pca_{nb_images}_{nb_slaves}_{timestamp}.csv"
 projected_df.to_csv(pca_file, sep=';')
