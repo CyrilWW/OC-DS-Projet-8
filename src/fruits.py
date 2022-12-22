@@ -129,14 +129,9 @@ print(f"OK: model.transform")
 
 elapsed = time.time() - t0
 
-# Ecriture du résultat de l'ACP
-columns = [f"F{k+1}" for k in range(k_dim)]
-projected_df = projected.toPandas()
-projected_df['Path'] = img_path
-
-pca_file = f"s3://oc-ds-p8-fruits-project/pca_{nb_images}_{nb_slaves}_{timestamp}.csv"
-projected_df.to_csv(pca_file, sep=';')
-print("OK: projected_df.to_csv S3")
+# Ecritures des fichiers Parquet distribués
+result_dir = f"s3://oc-ds-p8-fruits-project/results_{nb_images}_{nb_slaves}_{timestamp}"
+projected.write.mode("overwrite").parquet(result_dir)
 
 # Ecriture du temps écoulé
 print(f"Temps utilisateur : {elapsed}")
